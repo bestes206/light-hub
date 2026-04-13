@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>light-hub probe</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; padding: 16px; max-width: 600px; margin: auto; background: #0a0a12; color: #e8e8ee; }
+    button { display: block; width: 100%; padding: 14px; margin: 8px 0; font-size: 16px; background: #2a2a3a; color: #e8e8ee; border: 1px solid #444; border-radius: 8px; }
+    button:active { background: #3a3a4a; }
+    pre { background: #1a1a28; padding: 12px; border-radius: 8px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+    h2 { font-size: 14px; color: #888; margin-top: 24px; text-transform: uppercase; letter-spacing: 1px; }
+  </style>
+</head>
+<body>
+  <h1>light-hub probe</h1>
+  <p>Validation rig. Tap a button, watch the log.</p>
+
+  <button id="btn-pair">1. Pair & blink (power on → 1s → off)</button>
+  <button id="btn-known">2. Check getDevices() (returns previously-paired)</button>
+  <button id="btn-color">3. Set color RED on a re-paired device</button>
+
+  <h2>Log</h2>
+  <pre id="log"></pre>
+
+  <script>
+    const log = (msg, obj) => {
+      const el = document.getElementById('log');
+      const line = obj === undefined ? msg : msg + '\n' + JSON.stringify(obj, null, 2);
+      el.textContent = line + '\n\n' + el.textContent;
+    };
+
+    const SERVICES = [
+      '0000fff0-0000-1000-8000-00805f9b34fb',
+      '0000ffe0-0000-1000-8000-00805f9b34fb',
+    ];
+    const WRITE_CHARS = {
+      '0000fff0-0000-1000-8000-00805f9b34fb': '0000fff3-0000-1000-8000-00805f9b34fb',
+      '0000ffe0-0000-1000-8000-00805f9b34fb': '0000ffe1-0000-1000-8000-00805f9b34fb',
+    };
+
+    const POWER_ON   = new Uint8Array([0x7e, 0x00, 0x04, 0xf0, 0x00, 0x01, 0xff, 0x00, 0xef]);
+    const POWER_OFF  = new Uint8Array([0x7e, 0x00, 0x04, 0x00, 0x00, 0x00, 0xff, 0x00, 0xef]);
+    const colorBytes = (r, g, b) => new Uint8Array([0x7e, 0x00, 0x05, 0x03, r, g, b, 0x00, 0xef]);
+
+    async function findWritable(server) {
+      for (const svcUuid of SERVICES) {
+        try {
+          const svc = await server.getPrimaryService(svcUuid);
+          const charUuid = WRITE_CHARS[svcUuid];
+          const ch = await svc.getCharacteristic(charUuid);
+          log(`Found service ${svcUuid} char ${charUuid}`);
+          log('Properties', {
+            write: ch.properties.write,
+            writeWithoutResponse: ch.properties.writeWithoutResponse,
+          });
+          return ch;
+        } catch (e) {
+          log(`Service ${svcUuid} not found, trying next…`);
+        }
+      }
+      throw new Error('No writable service found');
+    }
+
+    async function writeFrame(ch, bytes) {
+      if (ch.properties.writeWithoutResponse) {
+        await ch.writeValueWithoutResponse(bytes);
+      } else {
+        await ch.writeValue(bytes);
+      }
+    }
+
+    document.getElementById('btn-pair').onclick = async () => {
+      try {
+        log('Requesting device…');
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [
+            { services: [SERVICES[0]] },
+            { services: [SERVICES[1]] },
+            { namePrefix: 'ELK-' },
+            { namePrefix: 'MELK' },
+            { namePrefix: 'LEDBLE' },
+            { namePrefix: 'LED-' },
+            { namePrefix: 'DAY' },
+            { namePrefix: 'DB-' },
+          ],
+          optionalServices: SERVICES,
+        });
+        log('Picked', { name: device.name, id: device.id });
+
+        const server = await device.gatt.connect();
+        log('GATT connected');
+
+        const ch = await findWritable(server);
+
+        await writeFrame(ch, POWER_ON);
+        log('Sent POWER_ON');
+        await new Promise(r => setTimeout(r, 1000));
+        await writeFrame(ch, POWER_OFF);
+        log('Sent POWER_OFF');
+
+        device.gatt.disconnect();
+        log('SUCCESS — strip blinked');
+      } catch (e) {
+        log('ERROR: ' + e.message);
+      }
+    };
+
+    document.getElementById('btn-known').onclick = async () => {
+      try {
+        if (!navigator.bluetooth.getDevices) {
+          log('getDevices() NOT SUPPORTED in this browser/Bluefy version');
+          return;
+        }
+        const devices = await navigator.bluetooth.getDevices();
+        log(`getDevices() returned ${devices.length} device(s)`,
+          devices.map(d => ({ name: d.name, id: d.id })));
+      } catch (e) {
+        log('ERROR: ' + e.message);
+      }
+    };
+
+    document.getElementById('btn-color').onclick = async () => {
+      try {
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [
+            { services: [SERVICES[0]] },
+            { services: [SERVICES[1]] },
+            { namePrefix: 'ELK-' },
+            { namePrefix: 'MELK' },
+            { namePrefix: 'LEDBLE' },
+            { namePrefix: 'LED-' },
+            { namePrefix: 'DAY' },
+            { namePrefix: 'DB-' },
+          ],
+          optionalServices: SERVICES,
+        });
+        const server = await device.gatt.connect();
+        const ch = await findWritable(server);
+        await writeFrame(ch, POWER_ON);
+        await writeFrame(ch, colorBytes(255, 0, 0));
+        log('Sent RED');
+      } catch (e) {
+        log('ERROR: ' + e.message);
+      }
+    };
+  </script>
+</body>
+</html>

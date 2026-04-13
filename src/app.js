@@ -149,14 +149,25 @@ root.addEventListener('input', (e) => {
   const target = e.target;
   if (target.dataset.action !== 'brightness') return;
   const localId = parseRoute().localId;
+  const percent = parseInt(target.value, 10);
+  // Immediate visual feedback: update the label and glow intensity.
+  const label = root.querySelector('.label');
+  if (label) label.textContent = `Brightness ${percent}%`;
+  const device = store.findByLocalId(localId);
+  const glow = root.querySelector('.detail-glow');
+  if (device && glow) {
+    const { r, g, b } = device.lastColor;
+    const scale = 12 + (percent / 100) * 32;
+    glow.style.boxShadow = `0 0 ${scale}px rgb(${r},${g},${b})`;
+    glow.style.opacity = 0.3 + (percent / 100) * 0.7;
+  }
   const ref = runtime.get(localId)?.device;
   if (!ref) return;
-  const percent = parseInt(target.value, 10);
   throttledWrite(async () => {
     try {
       await driver.setBrightness(ref, percent);
       store.updateState(localId, { lastBrightness: percent });
-      render();
+      // Skip full render during drag — keeps slider smooth.
     } catch (err) {
       console.error('setBrightness failed:', err);
       setStatus(localId, 'OFFLINE');
@@ -200,6 +211,14 @@ root.addEventListener('pointercancel', () => {
   pressTimer = null;
 });
 
+function updateGlowPreview({ r, g, b }) {
+  const glow = root.querySelector('.detail-glow');
+  if (!glow) return;
+  const c = `rgb(${r}, ${g}, ${b})`;
+  glow.style.background = c;
+  glow.style.boxShadow = `0 0 40px ${c}, 0 0 12px ${c}`;
+}
+
 function applyWheel(e) {
   const wheelWrap = root.querySelector('[data-action="wheel"]');
   if (!wheelWrap) return;
@@ -209,6 +228,7 @@ function applyWheel(e) {
   const { r, g, b } = hueToRgb(hue);
   pin.style.color = `rgb(${r},${g},${b})`;
   placeWheelPin(pin, wheel, hue);
+  updateGlowPreview({ r, g, b });
 
   const localId = parseRoute().localId;
   const ref = runtime.get(localId)?.device;

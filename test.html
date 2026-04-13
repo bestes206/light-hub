@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>light-hub tests</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; padding: 16px; max-width: 800px; margin: auto; }
+    .ok { color: #2a8c3a; }
+    .fail { color: #c43a3a; }
+    .suite { margin-top: 16px; font-weight: bold; }
+    pre { background: #f4f4f6; padding: 8px; border-radius: 4px; overflow: auto; font-size: 12px; }
+    .summary { padding: 12px; border-radius: 6px; margin-top: 16px; }
+    .summary.pass { background: #e8f5ea; color: #2a8c3a; }
+    .summary.fail { background: #fce8e8; color: #c43a3a; }
+  </style>
+</head>
+<body>
+  <h1>light-hub tests</h1>
+  <div id="results"></div>
+
+  <script type="module">
+    const suites = [
+      () => import('./test/frames.test.js'),
+      () => import('./test/color.test.js'),
+      () => import('./test/store.test.js'),
+    ];
+
+    const out = document.getElementById('results');
+    let total = 0, passed = 0;
+
+    for (const load of suites) {
+      let mod;
+      try {
+        mod = await load();
+      } catch (e) {
+        const div = document.createElement('div');
+        div.className = 'suite fail';
+        div.textContent = `Failed to load suite: ${e.message}`;
+        out.appendChild(div);
+        continue;
+      }
+
+      const results = await mod.run();
+      const suiteName = results[0]?.suite || 'unknown';
+      const header = document.createElement('div');
+      header.className = 'suite';
+      header.textContent = suiteName;
+      out.appendChild(header);
+
+      for (const r of results) {
+        total++;
+        const div = document.createElement('div');
+        if (r.ok) {
+          passed++;
+          div.className = 'ok';
+          div.textContent = `  ✓ ${r.test}`;
+        } else {
+          div.className = 'fail';
+          div.innerHTML = `  ✗ ${r.test}<pre>${r.error}</pre>`;
+        }
+        out.appendChild(div);
+      }
+    }
+
+    const summary = document.createElement('div');
+    summary.className = 'summary ' + (passed === total ? 'pass' : 'fail');
+    summary.textContent = `${passed}/${total} tests passed`;
+    out.appendChild(summary);
+  </script>
+</body>
+</html>

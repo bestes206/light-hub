@@ -20,11 +20,13 @@ Out of scope for v1: scenes, effects, scheduling, music sync, sharing across hou
 
 ## Approach
 
-A vanilla HTML/CSS/JS Progressive Web App hosted on GitHub Pages, accessed inside the **Bluefy** iOS browser (which exposes Web Bluetooth that Safari refuses to support). The app talks directly to the lights over BLE GATT using the ELK-BLEDOM protocol family, which both vendor apps' BLE strips speak.
+A vanilla HTML/CSS/JS Progressive Web App hosted on GitHub Pages, accessed inside the **Bluefy** iOS browser (which exposes Web Bluetooth that Safari refuses to support). The app talks directly to the lights over BLE GATT. **Two protocols are supported**: ELK-BLEDOM (Lotus Lantern) and QC Light Protocol (DayBetter "Smart Light"). Protocol is chosen per-device based on the matched service UUID.
 
 ### Why this works
 
-- All three lights are *expected* to speak the same underlying protocol (ELK-BLEDOM, 9-byte `7E…EF` frames) — confirmed for Lotus Lantern via published reverse-engineering, hypothesized for DayBetter via the `homebridge-daybetter` plugin lineage. One driver covers both brands if validated. Confirmation is part of the validation gate (R3).
+- Lotus Lantern strips speak **ELK-BLEDOM** (9-byte `7E…EF` frames on service `fff0` / write `fff3`). Confirmed via validation gate on real hardware 2026-04-12.
+- DayBetter "Smart Light" strips speak **QC Light Protocol** (A0-framed with CRC-16/MODBUS on service `ff10` / write `ff12`). Confirmed via validation gate on real hardware after decompiling the `com.th.daybetter` APK v1.6.6.
+- Both protocols share a common shape: unauthenticated write-only over BLE GATT, no pairing handshake, no encryption. The driver detects which to use from the advertised service UUID.
 - Web Bluetooth in Bluefy gives a webpage native BLE access on iOS without any native app, App Store, or developer account.
 - GitHub Pages provides free HTTPS hosting — Web Bluetooth requires HTTPS.
 - No backend, no accounts, no cloud — each phone is independent and only talks to local lights.
@@ -98,32 +100,35 @@ Power-user shortcut: a "Connect All" button on the list screen prompts the picke
 
 ### BLE driver (`ble.js` + `frames.js`)
 
-**Discovery filter** (combined service UUID + name prefix to maximize hit rate across ELK-family variants):
+**Discovery filter** (combined service UUID + name prefix to cover both protocol families):
 
 ```js
 navigator.bluetooth.requestDevice({
   filters: [
-    { services: ['0000fff0-0000-1000-8000-00805f9b34fb'] },
-    { services: ['0000ffe0-0000-1000-8000-00805f9b34fb'] },
+    { services: ['0000fff0-0000-1000-8000-00805f9b34fb'] }, // ELK
+    { services: ['0000ffe0-0000-1000-8000-00805f9b34fb'] }, // ELK alt
+    { services: ['0000ff10-0000-1000-8000-00805f9b34fb'] }, // QC (DayBetter)
     { namePrefix: 'ELK-' },
     { namePrefix: 'MELK' },
     { namePrefix: 'LEDBLE' },
     { namePrefix: 'LED-' },
+    { namePrefix: 'Smart Light' },
     { namePrefix: 'DAY' },
     { namePrefix: 'DB-' },
   ],
   optionalServices: [
     '0000fff0-0000-1000-8000-00805f9b34fb',
     '0000ffe0-0000-1000-8000-00805f9b34fb',
+    '0000ff10-0000-1000-8000-00805f9b34fb',
   ],
 })
 ```
 
-**Service/characteristic resolution:** try `fff0`/`fff3` first, fall back to `ffe0`/`ffe1`. Cache the working pair per device so we don't re-probe next session.
+**Service/characteristic resolution & protocol detection:** try in order `fff0`→`fff3` (ELK), `ffe0`→`ffe1` (ELK-alt), `ff10`→`ff12` (QC). First match wins. The matched service is stored on the device record as `service`, `writeChar`, and `protocol` (`"elk"` or `"qc"`). Re-probing is skipped on subsequent connects — the driver reuses the saved `service` directly.
 
-**Write strategy:** at connect time, inspect `characteristic.properties.writeWithoutResponse`. Use `writeValueWithoutResponse` if available (faster, no ACK chatter), else fall back to `writeValue`.
+**Write strategy:** at connect time, inspect `characteristic.properties.writeWithoutResponse`. Use `writeValueWithoutResponse` if available (faster), else fall back to `writeValue`.
 
-**Command frames** (9 bytes, `7E…EF`) — reference values from `dave-code-ruiz/elkbledom` and `saharki/lotus-lantern-HACS`. Exact bytes are confirmed during the validation gate; if a strip needs variants (e.g., different reserved bytes, different brightness format), they go in `frames.js` as alternate builders.
+**ELK-BLEDOM command frames** (9 bytes, `7E…EF`, no CRC) — reference values from `dave-code-ruiz/elkbledom` + `saharki/lotus-lantern-HACS`, confirmed on real hardware:
 
 | Action | Bytes |
 |---|---|
@@ -132,9 +137,25 @@ navigator.bluetooth.requestDevice({
 | Set color (RGB) | `7E 00 05 03 RR GG BB 00 EF` |
 | Set brightness | `7E 00 01 BB 00 00 00 00 EF` (BB = 0x00–0x64) |
 
-Built by pure functions in `frames.js` — testable without a browser BLE stack.
+**QC Light Protocol frames** (variable length, CRC-16/MODBUS little-endian, format `A0 cmd len payload crc_lo crc_hi`) — extracted from decompiled `com.th.daybetter` APK v1.6.6, confirmed on real hardware:
 
-**Slider throttling:** color and brightness writes during drag are debounced to 100ms; final value always sent on pointer-up.
+| Action | Bytes (RRGGBB placeholders) |
+|---|---|
+| Power on | `A0 11 04 01` + CRC |
+| Power off | `A0 11 04 00` + CRC |
+| Set RGB mode | `A0 12 05 01 00` + CRC |
+| Set color (RGBW, W=0xFF) | `A0 15 07 RR GG BB FF` + CRC |
+| Set brightness | `A0 13 04 BB` + CRC (BB = 0x00–0x64) |
+
+QC quirks:
+- Before a color write, the driver must first send "set RGB mode" (one time per connection is sufficient).
+- RGB payload is 4 bytes: R, G, B, W. W is fixed to 0xFF on pure-RGB writes.
+- Minimum 150ms delay between consecutive writes (firmware requirement).
+- Send order for "on with color": mode → brightness → color.
+
+Both protocol families' builders live in `frames.js` as pure functions (`elk.buildPowerOn()`, `qc.buildPowerOn()`, etc.). The CRC-16/MODBUS helper is a separate pure function, also in `frames.js`.
+
+**Slider throttling:** color and brightness writes during drag are debounced to 150ms (meets QC's minimum-delay requirement; generous enough for ELK). Final value always sent on pointer-up.
 
 **Driver API:**
 
@@ -166,6 +187,7 @@ Single localStorage key `light-hub:devices`. Schema versioned in case of future 
       "bleId": "<navigator.bluetooth device.id>",             // BLE pairing identifier
       "name": "Living Room",                                  // user-friendly
       "originalName": "ELK-BLEDOM-1234",                      // BLE-advertised, for re-binding
+      "protocol": "elk",                                      // "elk" or "qc"
       "service": "0000fff0-0000-1000-8000-00805f9b34fb",
       "writeChar": "0000fff3-0000-1000-8000-00805f9b34fb",
       "lastColor": { "r": 255, "g": 107, "b": 53 },

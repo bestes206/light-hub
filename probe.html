@@ -19,6 +19,7 @@
   <button id="btn-pair">1. Pair & blink (power on → 1s → off)</button>
   <button id="btn-known">2. Check getDevices() (returns previously-paired)</button>
   <button id="btn-color">3. Set color RED on a re-paired device</button>
+  <button id="btn-scan-all">4. Scan ALL BLE devices (for unknown brands)</button>
 
   <h2>Log</h2>
   <pre id="log"></pre>
@@ -115,6 +116,63 @@
         const devices = await navigator.bluetooth.getDevices();
         log(`getDevices() returned ${devices.length} device(s)`,
           devices.map(d => ({ name: d.name, id: d.id })));
+      } catch (e) {
+        log('ERROR: ' + e.message);
+      }
+    };
+
+    // Broader list of common BLE LED service UUIDs for unknown-brand discovery
+    const LED_SERVICES_WIDE = [
+      '0000fff0-0000-1000-8000-00805f9b34fb', // ELK-BLEDOM
+      '0000ffe0-0000-1000-8000-00805f9b34fb', // ELK variant / HM-10
+      '0000ffe5-0000-1000-8000-00805f9b34fb', // MagicBlue
+      '0000ff00-0000-1000-8000-00805f9b34fb', // Magic Home / Flux
+      '0000fa00-0000-1000-8000-00805f9b34fb', // LEDnet variants
+      '0000feb3-0000-1000-8000-00805f9b34fb', // MagicBlue alt
+      '0000af30-0000-1000-8000-00805f9b34fb', // rare
+      '0000afd0-0000-1000-8000-00805f9b34fb', // Chinese LEDs
+      '000000ff-0000-1000-8000-00805f9b34fb', // generic
+      '0000ffb0-0000-1000-8000-00805f9b34fb', // Triones variant
+      '0000a032-0000-1000-8000-00805f9b34fb', // some WS2812-BT
+      '0000ffc0-0000-1000-8000-00805f9b34fb', // generic
+      '0000ffd0-0000-1000-8000-00805f9b34fb', // Triones
+      '0000ffd5-0000-1000-8000-00805f9b34fb', // happy_lighting / Triones
+      '0000fee0-0000-1000-8000-00805f9b34fb', // generic
+      '0000fee7-0000-1000-8000-00805f9b34fb', // some Chinese
+    ];
+
+    document.getElementById('btn-scan-all').onclick = async () => {
+      try {
+        log('Scanning ALL BLE devices (pick your unknown strip from the picker)…');
+        const device = await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: LED_SERVICES_WIDE,
+        });
+        log('Picked', { name: device.name, id: device.id });
+        try {
+          const server = await device.gatt.connect();
+          log('GATT connected — discovering services…');
+          const services = await server.getPrimaryServices();
+          const svcInfo = services.map(s => ({ uuid: s.uuid, isPrimary: s.isPrimary }));
+          log(`Advertised services (${services.length})`, svcInfo);
+          // Try each service — see if we can find a writable characteristic
+          for (const svc of services) {
+            try {
+              const chars = await svc.getCharacteristics();
+              log(`Service ${svc.uuid} has ${chars.length} characteristic(s)`,
+                chars.map(c => ({
+                  uuid: c.uuid,
+                  write: c.properties.write,
+                  writeWithoutResponse: c.properties.writeWithoutResponse,
+                })));
+            } catch (e) {
+              log(`Could not enumerate chars for ${svc.uuid}: ${e.message}`);
+            }
+          }
+          device.gatt.disconnect();
+        } catch (e) {
+          log('Could not connect/enumerate: ' + e.message);
+        }
       } catch (e) {
         log('ERROR: ' + e.message);
       }
